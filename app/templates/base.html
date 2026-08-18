@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}ConsultBae audio collection{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <strong>ConsultBae</strong> <span class="muted">audio collection</span>
+      <nav>
+        <a href="{{ url_for('record_view') }}">Submit</a>
+        <a href="{{ url_for('submissions_view') }}">Submissions{% if stats and stats.total %} ({{ stats.total }}){% endif %}</a>
+        <a href="{{ url_for('api_list_submissions') }}">API</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="wrap muted">
+    Submissions are matched to the merged people database from Task 1 on the
+    normalised phone number.
+  </footer>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

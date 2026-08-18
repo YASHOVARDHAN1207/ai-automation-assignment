@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Submissions &middot; ConsultBae audio collection{% endblock %}
+{% block content %}
+
+<h1>Submissions</h1>
+
+<div class="stats">
+  <div><span>{{ stats.total or 0 }}</span> submissions</div>
+  <div><span>{{ stats.linked or 0 }}</span> linked to a person</div>
+  <div><span>{{ stats.analysed or 0 }}</span> waveforms analysed</div>
+  <div><span>{{ stats.duplicates or 0 }}</span> duplicate uploads</div>
+  <div><span>{{ stats.avg_duration or 0 }}s</span> average length</div>
+  <div><span>{{ stats.total_mb or 0 }} MB</span> stored</div>
+</div>
+
+{% if not submissions %}
+  <p class="muted">Nothing submitted yet. <a href="{{ url_for('record_view') }}">Add one &rarr;</a></p>
+{% endif %}
+
+{% for s in submissions %}
+<article class="card submission">
+  <header>
+    <h3>
+      #{{ s.submission_id }} &middot; {{ s.submitted_name }}
+      <small class="muted">{{ s.submitted_phone_raw }}</small>
+    </h3>
+    <span class="badge {{ s.quality_label or 'unknown' }}">
+      {% if s.quality_score is not none %}{{ s.quality_score }}/100 {{ s.quality_label }}{% else %}not analysed{% endif %}
+    </span>
+  </header>
+
+  <audio controls preload="none" src="{{ url_for('media', filename=s.stored_filename) }}"></audio>
+
+  <p class="muted small">
+    {{ s.submitted_at }} &middot;
+    {{ 'recorded in browser' if s.capture_mode == 'browser_recording' else 'uploaded file' }}
+    {% if s.original_filename %}({{ s.original_filename }}){% endif %}
+    &middot;
+    {% if s.resolved_person_id %}
+      person <strong>#{{ s.resolved_person_id }}</strong> {{ s.person_name }}
+      {% if s.person_city %}&middot; {{ s.person_city }}{% endif %}
+      {% if s.person_gig_status %}&middot; {{ s.person_gig_status }}{% endif %}
+      <span class="muted">({{ s.person_link_method }})</span>
+    {% else %}
+      <span class="warn">not linked to a person</span>
+    {% endif %}
+    {% if s.duplicate_of %}
+      &middot; <span class="warn">identical audio to #{{ s.duplicate_of }}</span>
+    {% endif %}
+  </p>
+
+  {% if s.analysis_ok %}
+  <dl class="props">
+    <div><dt>Duration</dt><dd>{{ s.duration_seconds }} s</dd></div>
+    <div><dt>Sample rate</dt><dd>{{ s.sample_rate_khz }} kHz</dd></div>
+    <div><dt>Bitrate</dt><dd>{{ s.bitrate_kbps }} kbps</dd></div>
+    <div><dt>Channels</dt><dd>{{ s.channels }}{% if s.bit_depth %} &middot; {{ s.bit_depth }}-bit{% endif %}</dd></div>
+    <div><dt>Codec</dt><dd>{{ s.codec or '—' }}</dd></div>
+    <div><dt>Peak</dt><dd>{{ s.peak_dbfs }} dBFS</dd></div>
+    <div><dt>RMS</dt><dd>{{ s.rms_dbfs }} dBFS</dd></div>
+    <div><dt>Loudness</dt><dd>{% if s.loudness_lufs is not none %}{{ s.loudness_lufs }} LUFS{% else %}—{% endif %}</dd></div>
+    <div><dt>Crest factor</dt><dd>{% if s.crest_factor_db is not none %}{{ s.crest_factor_db }} dB{% else %}—{% endif %}</dd></div>
+    <div><dt>Noise floor</dt><dd>{{ s.noise_floor_dbfs }} dBFS</dd></div>
+    <div><dt>SNR</dt><dd>{% if s.estimated_snr_db is not none %}{{ s.estimated_snr_db }} dB{% else %}not estimated{% endif %}</dd></div>
+    <div><dt>Clipping</dt><dd>{{ s.clipping_pct }} %</dd></div>
+    <div><dt>Silence</dt><dd>{{ s.silence_pct }} %</dd></div>
+    <div><dt>Size</dt><dd>{{ (s.file_size_bytes / 1024) | round(0) | int }} KB</dd></div>
+  </dl>
+  {% if s.quality_reasons %}
+  <ul class="reasons">
+    {% for reason in s.quality_reasons %}<li>{{ reason }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% else %}
+  <p class="warn">Waveform not analysed: {{ s.analysis_note or 'unknown reason' }}</p>
+  {% endif %}
+</article>
+{% endfor %}
+
+{% endblock %}

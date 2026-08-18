@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h1>Submit a voice recording</h1>
+<p class="muted">
+  Record in the browser or upload a file. Either is fine. The server measures
+  duration, sample rate, bitrate, loudness and a noise estimate on submit.
+</p>
+
+<form id="submit-form" autocomplete="off">
+  <div class="grid">
+    <label>
+      Your name
+      <input type="text" name="name" id="name" required maxlength="80" placeholder="Priya Singh">
+    </label>
+    <label>
+      Phone number
+      <input type="tel" name="phone" id="phone" required maxlength="20" placeholder="+91 90000 00287">
+      <small class="muted">Any format. +91, leading 0, dashes and spaces are all handled.</small>
+    </label>
+  </div>
+
+  <fieldset>
+    <legend>1 &middot; Record in the browser</legend>
+    <div class="row">
+      <button type="button" id="btn-record" class="primary">Start recording</button>
+      <button type="button" id="btn-stop" disabled>Stop</button>
+      <span id="rec-status" class="muted">not recording</span>
+      <span id="rec-timer" class="timer">0.0s</span>
+    </div>
+    <div class="meter-wrap" aria-hidden="true"><div class="meter" id="level-meter"></div></div>
+    <small class="muted">
+      Recorded as 16-bit PCM WAV in the browser, not WebM/Opus &mdash; so the
+      server can analyse the waveform with the Python standard library and no
+      codec installed.
+    </small>
+  </fieldset>
+
+  <fieldset>
+    <legend>2 &middot; or upload a file</legend>
+    <input type="file" id="file" accept="audio/*">
+    <small class="muted">
+      wav, mp3, m4a, ogg, opus, webm, flac &mdash; up to 25&nbsp;MB.
+      {% if not has_ffmpeg %}
+      <strong>ffmpeg was not found on this machine</strong>, so compressed
+      uploads will be stored with container metadata only (no loudness). WAV is
+      fully analysed either way.
+      {% endif %}
+    </small>
+  </fieldset>
+
+  <div class="row">
+    <audio id="preview" controls hidden></audio>
+    <span id="chosen" class="muted"></span>
+  </div>
+
+  <button type="submit" id="btn-submit" class="primary big" disabled>Submit</button>
+  <div id="result"></div>
+</form>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='recorder.js') }}"></script>
+{% endblock %}
