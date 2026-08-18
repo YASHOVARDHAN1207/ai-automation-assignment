@@ -1,0 +1,22 @@
+# ---------------------------------------------------------------------------
+# Task 1 + Task 4 (the merge pipeline and the data-issues report) have ZERO
+# third-party dependencies. They run on a bare Python 3.8+ install using only
+# the standard library:
+#
+#     python3 -m pipeline.run --report
+#     python3 -m unittest discover -s tests -t .
+#
+# The dependencies below are only needed for the Task 3 audio app.
+# ---------------------------------------------------------------------------
+
+Flask>=2.0            # the web app
+numpy>=1.20           # waveform maths (RMS, peak, K-weighted loudness, SNR)
+
+# Optional, not required:
+#   scipy      makes the K-weighting biquad faster. audio_analysis falls back to
+#              an exact pure-Python filter when it is absent, so skip it unless
+#              you are analysing long files.
+#   ffmpeg     a BINARY, not a pip package. Needed only to analyse compressed
+#              uploads (mp3/m4a/webm). The browser recorder produces PCM WAV,
+#              which is read with the standard library, so the core flow works
+#              without it. On macOS: brew install ffmpeg
