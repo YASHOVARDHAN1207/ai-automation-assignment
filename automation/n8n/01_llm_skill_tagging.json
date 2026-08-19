@@ -1,0 +1,342 @@
+{
+  "name": "ConsultBae - LLM skill tagging (write-back)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Every 15 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-660, 300]
+    },
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Run once manually",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-660, 480]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.CONSULTBAE_BASE_URL || 'http://host.docker.internal:5055' }}/api/people/untagged",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "20"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "a1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Get untagged people",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-420, 380],
+      "notes": "Idempotent by design: a person disappears from this endpoint once tagged, so a crashed run just resumes and a re-run costs nothing."
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "people",
+        "options": {
+          "destinationFieldName": "person"
+        }
+      },
+      "id": "a1b2c3d4-0004-4000-8000-000000000004",
+      "name": "One item per person",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [-200, 380]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "a1b2c3d4-0005-4000-8000-000000000005",
+      "name": "Loop over people",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [20, 380],
+      "notes": "One person per LLM call. Batching several into one prompt is cheaper but makes a single malformed answer poison the whole batch, and there is no way to retry just the bad one."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'claude-sonnet-5',\n  max_tokens: 300,\n  temperature: 0,\n  system: $('Get untagged people').first().json.instructions\n        + '\\n\\nAllowed categories:\\n'\n        + Object.entries($('Get untagged people').first().json.category_definitions)\n            .map(([key, meaning]) => `- ${key}: ${meaning}`).join('\\n')\n        + '\\n\\nRespond with JSON only. No prose, no code fences.',\n  messages: [{\n    role: 'user',\n    content: 'Contractor: ' + $json.person.full_name\n           + '\\nCity: ' + ($json.person.city || 'unknown')\n           + '\\nYears of experience: ' + ($json.person.experience_years ?? 'unknown')\n           + '\\nSkills: ' + $json.person.skills.join(', ')\n  }],\n  stop_sequences: ['\\n\\n\\n']\n}) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "a1b2c3d4-0006-4000-8000-000000000006",
+      "name": "Claude: classify skills",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 380],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "notes": "Raw Messages API over the HTTP node rather than the LangChain Anthropic node, so this workflow imports on a stock n8n with no community nodes. temperature 0 because classification should not be creative. neverError:true so a 429 or 529 reaches the parser and becomes a skip rather than killing the run. Credential: HTTP Header Auth named x-api-key with the Anthropic key."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse and VALIDATE the model's answer. An LLM will occasionally return\n// prose, a code fence, or a category nobody defined, and writing that\n// straight into the database would silently break every report built on it.\n// Anything that does not pass is skipped and reported, never guessed at.\nconst allowed = $('Get untagged people').first().json.allowed_categories;\nconst person = $('Loop over people').first().json.person;\nconst out = [];\n\nfor (const item of $input.all()) {\n  const response = item.json;\n\n  // API-level failure (rate limit, overload). Leave the person untagged: the\n  // next scheduled run picks them up again because the endpoint is idempotent.\n  if (response.error || !response.content) {\n    out.push({ json: { ok: false, person_id: person.person_id,\n      reason: 'api_error: ' + JSON.stringify(response.error || response).slice(0, 200) } });\n    continue;\n  }\n\n  const text = (response.content || [])\n    .filter(block => block.type === 'text').map(block => block.text).join('').trim();\n\n  // Strip a ```json fence if the model added one anyway.\n  const cleaned = text.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();\n\n  let parsed;\n  try {\n    parsed = JSON.parse(cleaned);\n  } catch (error) {\n    out.push({ json: { ok: false, person_id: person.person_id,\n      reason: 'unparseable_json', raw: text.slice(0, 200) } });\n    continue;\n  }\n\n  const category = String(parsed.category || '').trim().toLowerCase();\n  if (!allowed.includes(category)) {\n    out.push({ json: { ok: false, person_id: person.person_id,\n      reason: 'category_not_allowed', got: parsed.category } });\n    continue;\n  }\n\n  let confidence = Number(parsed.confidence);\n  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {\n    confidence = null;\n  }\n\n  out.push({ json: {\n    ok: true,\n    person_id: person.person_id,\n    person_name: person.full_name,\n    category,\n    confidence,\n    rationale: String(parsed.rationale || '').slice(0, 300),\n    key_skills: Array.isArray(parsed.key_skills) ? parsed.key_skills.join(', ')\n                                                 : String(parsed.key_skills || ''),\n    model: response.model || 'claude-sonnet-5',\n    input_tokens: response.usage ? response.usage.input_tokens : null,\n    output_tokens: response.usage ? response.usage.output_tokens : null\n  } });\n}\n\nreturn out;"
+      },
+      "id": "a1b2c3d4-0007-4000-8000-000000000007",
+      "name": "Validate the answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 380]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-ok",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0008-4000-8000-000000000008",
+      "name": "Usable answer?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [680, 380]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($vars.CONSULTBAE_BASE_URL || 'http://host.docker.internal:5055') + '/api/people/' + $json.person_id + '/category' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  category: $json.category,\n  confidence: $json.confidence,\n  rationale: $json.rationale,\n  key_skills: $json.key_skills,\n  model: $json.model,\n  tagged_by: 'n8n/01_llm_skill_tagging'\n}) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "a1b2c3d4-0009-4000-8000-000000000009",
+      "name": "Write category back",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 280],
+      "notes": "The API re-validates the category server-side and returns 400 on anything outside the allowlist. The flow is not the last line of defence - it cannot be, since anyone can POST to this endpoint."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Everything the model got wrong, collected for a human instead of retried\n// forever. These people stay untagged, so the next scheduled run tries again.\nreturn [{ json: {\n  skipped: $input.all().map(item => item.json),\n  count: $input.all().length\n} }];"
+      },
+      "id": "a1b2c3d4-0010-4000-8000-000000000010",
+      "name": "Collect skipped",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 480]
+    },
+    {
+      "parameters": {
+        "url": "={{ ($vars.CONSULTBAE_BASE_URL || 'http://host.docker.internal:5055') + '/api/categories' }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0011-4000-8000-000000000011",
+      "name": "Final tally",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 620],
+      "notes": "Runs when the loop is done. Shows the category spread and every low-confidence tag, which is the queue a human should actually look at."
+    }
+  ],
+  "connections": {
+    "Every 15 minutes": {
+      "main": [
+        [
+          {
+            "node": "Get untagged people",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run once manually": {
+      "main": [
+        [
+          {
+            "node": "Get untagged people",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get untagged people": {
+      "main": [
+        [
+          {
+            "node": "One item per person",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One item per person": {
+      "main": [
+        [
+          {
+            "node": "Loop over people",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop over people": {
+      "main": [
+        [
+          {
+            "node": "Final tally",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Claude: classify skills",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude: classify skills": {
+      "main": [
+        [
+          {
+            "node": "Validate the answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate the answer": {
+      "main": [
+        [
+          {
+            "node": "Usable answer?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Usable answer?": {
+      "main": [
+        [
+          {
+            "node": "Write category back",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Collect skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write category back": {
+      "main": [
+        [
+          {
+            "node": "Loop over people",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect skipped": {
+      "main": [
+        [
+          {
+            "node": "Loop over people",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "active": false,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "consultbae"
+    }
+  ],
+  "versionId": "consultbae-llm-tagging-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

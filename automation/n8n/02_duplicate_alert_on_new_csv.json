@@ -1,0 +1,288 @@
+{
+  "name": "ConsultBae - duplicate alert on a new CSV",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "consultbae/new-applicants",
+        "responseMode": "responseNode",
+        "options": {
+          "binaryPropertyName": "file",
+          "rawBody": false
+        }
+      },
+      "id": "b2c3d4e5-0001-4000-8000-000000000001",
+      "name": "Webhook: CSV arrives",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-680, 300],
+      "webhookId": "consultbae-new-applicants",
+      "notes": "POST a multipart form with the CSV as field 'file'. Swap this node for a Gmail or Google Drive trigger and nothing downstream changes - that is the point of keeping the parsing in the next node rather than in the trigger."
+    },
+    {
+      "parameters": {
+        "operation": "csv",
+        "binaryPropertyName": "file",
+        "options": {
+          "headerRow": true
+        }
+      },
+      "id": "b2c3d4e5-0002-4000-8000-000000000002",
+      "name": "Parse the CSV",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [-460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Map whatever column names this file happens to use onto one shape, and\n// drop rows that are structurally junk before they reach the API.\n//\n// The three source files spell the same field four different ways\n// ('Full Name', 'worker_name', 'Name', 'name'), and one of them contains a\n// repeated header line and a completely blank row. Any incoming file will do\n// the same, so the mapping is by alias rather than by exact key.\nconst alias = {\n  name:  ['name', 'full name', 'full_name', 'worker_name', 'candidate', 'contact name'],\n  email: ['email', 'email_id', 'email address', 'e-mail', 'mail'],\n  phone: ['phone', 'phone number', 'phone_number', 'mobile', 'contact', 'contact number'],\n  city:  ['city', 'location', 'base city', 'current city']\n};\n\nfunction pick(row, keys) {\n  for (const [rawKey, value] of Object.entries(row)) {\n    const key = String(rawKey || '').trim().toLowerCase();\n    if (keys.includes(key) && String(value || '').trim() !== '') {\n      return String(value).trim();\n    }\n  }\n  return '';\n}\n\nconst rows = [];\nconst skipped = [];\n\n$input.all().forEach((item, index) => {\n  const raw = item.json;\n  const lineNumber = index + 2;   // +1 for the header, +1 for 1-based counting\n\n  const values = Object.values(raw).map(v => String(v == null ? '' : v).trim());\n  if (values.every(v => v === '')) {\n    skipped.push({ line: lineNumber, reason: 'blank row' });\n    return;\n  }\n\n  // A header line repeated inside the data: every cell equals its own column\n  // name. Left alone it becomes a contact called \"Name\" living in \"City\".\n  const looksLikeHeader = Object.entries(raw).every(([key, value]) =>\n    String(key || '').trim().toLowerCase() === String(value || '').trim().toLowerCase());\n  if (looksLikeHeader) {\n    skipped.push({ line: lineNumber, reason: 'repeated header row' });\n    return;\n  }\n\n  const row = {\n    name:  pick(raw, alias.name),\n    email: pick(raw, alias.email),\n    phone: pick(raw, alias.phone),\n    city:  pick(raw, alias.city),\n    source_line: lineNumber\n  };\n\n  if (!row.name && !row.email && !row.phone) {\n    skipped.push({ line: lineNumber, reason: 'no name, email or phone' });\n    return;\n  }\n\n  rows.push(row);\n});\n\n// Note what is NOT done here: no phone normalisation, no lowercasing, no\n// matching. That logic already exists once, tested, in pipeline/normalize.py.\n// Reimplementing it in a Code node would give two subtly different definitions\n// of \"the same person\", and the copy inside n8n is the one nobody tests.\nreturn [{ json: {\n  source: $('Webhook: CSV arrives').first().json.headers\n    ? ($('Webhook: CSV arrives').first().json.query.filename || 'webhook upload')\n    : 'webhook upload',\n  rows,\n  skipped,\n  parsed_count: rows.length,\n  skipped_count: skipped.length\n} }];"
+      },
+      "id": "b2c3d4e5-0003-4000-8000-000000000003",
+      "name": "Map columns, drop junk rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($vars.CONSULTBAE_BASE_URL || 'http://host.docker.internal:5055') + '/api/match/check' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ source: $json.source, rows: $json.rows }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "b2c3d4e5-0004-4000-8000-000000000004",
+      "name": "Check against the database",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-20, 300],
+      "notes": "The API re-normalises every value through pipeline.normalize and applies the same match order as the merge pipeline: exact email, exact phone, then name+city as a REVIEW signal only. It also writes an automation_events row, so the alert is reconstructable afterwards."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-attention",
+              "leftValue": "={{ $json.needs_attention }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b2c3d4e5-0005-4000-8000-000000000005",
+      "name": "Anything to flag?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [200, 300],
+      "notes": "Branches on needs_attention (duplicates OR review cases), not on duplicates alone. A row whose phone could not be parsed is not a clean pass - it is an unanswered question."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build one readable alert. A 40-row JSON dump in Slack gets muted within a\n// week, so the message leads with the counts and names at most five examples.\nconst data = $json;\nconst duplicates = data.results.filter(r => r.status === 'duplicate');\nconst review = data.results.filter(r => r.status === 'needs_review');\n\nfunction describe(row) {\n  const who = row.normalised.name || row.input.name || '(no name)';\n  const key = row.matched_on ? ` on ${row.matched_on}` : '';\n  const person = row.person_id ? ` -> existing person #${row.person_id} ${row.person_name}` : '';\n  return `• line ${row.input.source_line}: ${who}${person}${key}`;\n}\n\nconst lines = [];\nlines.push(`*${data.source}*: ${data.checked} row(s) checked.`);\nlines.push(`${data.duplicate_count} already in the database, ${data.new_count} new, ${data.review_count} need a human.`);\n\nif (duplicates.length) {\n  lines.push('', '*Already on file:*');\n  duplicates.slice(0, 5).forEach(row => lines.push(describe(row)));\n  if (duplicates.length > 5) lines.push(`…and ${duplicates.length - 5} more`);\n}\n\nif (review.length) {\n  lines.push('', '*Needs a human:*');\n  review.slice(0, 5).forEach(row => {\n    lines.push(describe(row) + (row.warnings.length ? `\\n    ${row.warnings[0]}` : ''));\n  });\n  if (review.length > 5) lines.push(`…and ${review.length - 5} more`);\n}\n\nif (data.undeliverable_email_count) {\n  lines.push('', `⚠️ ${data.undeliverable_email_count} address(es) are on RFC 2606 reserved domains and cannot receive mail.`);\n}\n\nreturn [{ json: {\n  alert_text: lines.join('\\n'),\n  subject: `[ConsultBae] ${data.duplicate_count} duplicate + ${data.review_count} review in ${data.source}`,\n  duplicate_count: data.duplicate_count,\n  new_count: data.new_count,\n  review_count: data.review_count,\n  source: data.source\n} }];"
+      },
+      "id": "b2c3d4e5-0006-4000-8000-000000000006",
+      "name": "Compose the alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 200]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#recruitment-ops",
+          "mode": "name"
+        },
+        "text": "={{ $json.alert_text }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": true
+        }
+      },
+      "id": "b2c3d4e5-0007-4000-8000-000000000007",
+      "name": "Slack: duplicate alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [640, 120],
+      "webhookId": "",
+      "continueOnFail": true,
+      "notes": "continueOnFail: if Slack is down the webhook must still answer the caller. An alerting channel that takes the whole flow with it is worse than no alerting channel. Needs a Slack credential; the email node below is the no-credential alternative."
+    },
+    {
+      "parameters": {
+        "sendTo": "ops@consultbae.example",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "message": "={{ $json.alert_text }}",
+        "options": {}
+      },
+      "id": "b2c3d4e5-0008-4000-8000-000000000008",
+      "name": "Email: duplicate alert",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [640, 280],
+      "continueOnFail": true,
+      "disabled": true,
+      "notes": "Disabled by default so the workflow imports and runs without SMTP credentials. Enable either this or the Slack node."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  ok: true,\n  source: $('Check against the database').first().json.source,\n  checked: $('Check against the database').first().json.checked,\n  duplicates: $('Check against the database').first().json.duplicate_count,\n  new: $('Check against the database').first().json.new_count,\n  needs_review: $('Check against the database').first().json.review_count,\n  skipped_rows: $('Map columns, drop junk rows').first().json.skipped,\n  alerted: $('Check against the database').first().json.needs_attention\n}) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "b2c3d4e5-0009-4000-8000-000000000009",
+      "name": "Respond to caller",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [860, 300],
+      "notes": "Answers on both branches. Whoever uploaded the file gets the verdict synchronously instead of having to go and look in Slack."
+    },
+    {
+      "parameters": {
+        "jsCode": "// The all-clear path. Still returns something: 'nothing to report' is a\n// result, and silence is indistinguishable from a broken flow.\nreturn [{ json: {\n  clean: true,\n  message: `${$json.checked} row(s) checked, nothing already on file.`\n} }];"
+      },
+      "id": "b2c3d4e5-0010-4000-8000-000000000010",
+      "name": "No duplicates - log only",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 420]
+    }
+  ],
+  "connections": {
+    "Webhook: CSV arrives": {
+      "main": [
+        [
+          {
+            "node": "Parse the CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse the CSV": {
+      "main": [
+        [
+          {
+            "node": "Map columns, drop junk rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map columns, drop junk rows": {
+      "main": [
+        [
+          {
+            "node": "Check against the database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check against the database": {
+      "main": [
+        [
+          {
+            "node": "Anything to flag?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything to flag?": {
+      "main": [
+        [
+          {
+            "node": "Compose the alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No duplicates - log only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose the alert": {
+      "main": [
+        [
+          {
+            "node": "Slack: duplicate alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Email: duplicate alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: duplicate alert": {
+      "main": [
+        [
+          {
+            "node": "Respond to caller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No duplicates - log only": {
+      "main": [
+        [
+          {
+            "node": "Respond to caller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "active": false,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "consultbae"
+    }
+  ],
+  "versionId": "consultbae-duplicate-alert-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
